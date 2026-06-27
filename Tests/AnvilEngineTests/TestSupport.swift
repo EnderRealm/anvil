@@ -218,3 +218,65 @@ func makeStubTk(
 func readLog(_ url: URL) -> String {
     (try? String(contentsOf: url, encoding: .utf8)) ?? ""
 }
+
+// MARK: - git fixtures
+
+struct GitSetupError: Error { let args: [String]; let output: String }
+
+@discardableResult
+func runGit(_ args: [String], cwd: URL) throws -> (status: Int32, output: String) {
+    let process = Process()
+    process.executableURL = WorktreeManager.defaultGitURL()
+    process.arguments = args
+    process.currentDirectoryURL = cwd
+    let pipe = Pipe()
+    process.standardOutput = pipe
+    process.standardError = pipe
+    try process.run()
+    let data = pipe.fileHandleForReading.readDataToEndOfFile()
+    process.waitUntilExit()
+    return (process.terminationStatus, String(decoding: data, as: UTF8.self))
+}
+
+func git(_ args: [String], in repo: URL) throws {
+    let result = try runGit(args, cwd: repo)
+    if result.status != 0 { throw GitSetupError(args: args, output: result.output) }
+}
+
+/// Initialize a temp git repo with one commit. `.env` is left untracked (the case worktrees
+/// don't carry); `.anvil/prepare.sh` touches a marker file and is committed.
+func makeGitRepo(in dir: URL, withEnv: Bool = true, withPrepareHook: Bool = true) throws -> URL {
+    let repo = dir.appendingPathComponent("repo-" + UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
+    try git(["init", "-q"], in: repo)
+    try git(["config", "user.email", "test@example.com"], in: repo)
+    try git(["config", "user.name", "Anvil Test"], in: repo)
+
+    try "# repo\n".write(to: repo.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+    if withEnv {
+        try "SECRET=1\n".write(to: repo.appendingPathComponent(".env"), atomically: true, encoding: .utf8)
+    }
+    if withPrepareHook {
+        let anvil = repo.appendingPathComponent(".anvil")
+        try FileManager.default.createDirectory(at: anvil, withIntermediateDirectories: true)
+        let script = anvil.appendingPathComponent("prepare.sh")
+        try "#!/bin/sh\ntouch prepared.marker\n".write(to: script, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
+        try git(["add", ".anvil/prepare.sh"], in: repo)
+    }
+    try git(["add", "README.md"], in: repo)
+    try git(["commit", "-q", "-m", "init"], in: repo)
+    return repo
+}
+
+/// Write a tk `config.yaml` mapping projects to repo paths, for engine repo resolution.
+func writeTicketConfig(_ projects: [String: URL], in dir: URL) throws -> URL {
+    var lines = ["central_root: /tmp/store", "projects:"]
+    for (name, url) in projects.sorted(by: { $0.key < $1.key }) {
+        lines.append("    \(name):")
+        lines.append("        path: \(url.path)")
+    }
+    let configURL = dir.appendingPathComponent("config.yaml")
+    try (lines.joined(separator: "\n") + "\n").write(to: configURL, atomically: true, encoding: .utf8)
+    return configURL
+}

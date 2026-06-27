@@ -33,6 +33,8 @@ public struct RunModel: Sendable, Equatable {
     public var sessionID: String?
     public var state: RunState
     public var cwd: URL
+    /// The run's isolated worktree, when one was created (nil for an explicit-workdir launch).
+    public var worktree: Worktree?
     /// Set when the run reports done but tk status disagrees — do not trust the sentinel alone.
     public var discrepancy: String?
     /// Most recent tk side-effect failure, if any.
@@ -44,12 +46,22 @@ public enum SupervisorEvent: Sendable {
     case queueChanged([PendingInput])
 }
 
+/// When the supervisor tears down a run's worktree. Default `keep` so nothing is silently
+/// destroyed — the worktree stays locatable and is cleanable on demand.
+public enum WorktreeCleanup: Sendable {
+    case keep
+    case onSuccess
+    case onTerminal
+}
+
 /// Composes `AnvilEngine` (the pure runner) with `TkClient`. It is the single consumer of the
 /// engine's per-run event stream, performs the tk side effects + queue management, and
 /// re-broadcasts an observable model for a future UI (F5). No UI framework.
 public actor RunSupervisor {
     private let engine: AnvilEngine
     private let tk: TkClient
+    private let worktrees: WorktreeManager
+    private let cleanupPolicy: WorktreeCleanup
     private let hostName: String
 
     private var runs: [RunID: RunModel] = [:]
@@ -61,10 +73,14 @@ public actor RunSupervisor {
     public init(
         engine: AnvilEngine,
         tk: TkClient,
+        worktrees: WorktreeManager = WorktreeManager(),
+        cleanupPolicy: WorktreeCleanup = .keep,
         hostName: String = ProcessInfo.processInfo.hostName
     ) {
         self.engine = engine
         self.tk = tk
+        self.worktrees = worktrees
+        self.cleanupPolicy = cleanupPolicy
         self.hostName = hostName
     }
 
@@ -92,26 +108,47 @@ public actor RunSupervisor {
 
     // MARK: - Commands
 
-    /// Launch a supervised run. `workdir` is resolved from the ticket's project when nil; the
-    /// supervisor owns the cwd because it is the break-glass `anvil-worktree` pointer.
+    /// Launch a supervised run. When `workdir` is nil the supervisor resolves the project repo
+    /// and creates an isolated worktree, using its path as the cwd (so `anvil-worktree` is a
+    /// real worktree and `--resume` lands there). An explicit `workdir` bypasses worktree
+    /// creation. The supervisor owns the cwd — it is the break-glass `anvil-worktree` pointer.
     @discardableResult
     public func launch(ticketID: String, workdir: URL? = nil) async throws -> RunID {
         let cwd: URL
+        var worktree: Worktree?
         if let workdir {
             cwd = workdir
         } else {
-            cwd = try await engine.repoPath(forTicket: ticketID)
+            let repo = try await engine.repoPath(forTicket: ticketID)
+            let created = try await worktrees.create(ticketID: ticketID, repoURL: repo)
+            worktree = created
+            cwd = created.path
         }
-        let handle = try await engine.launch(ticketID: ticketID, workdir: cwd)
+        let handle: RunHandle
+        do {
+            handle = try await engine.launch(ticketID: ticketID, workdir: cwd)
+        } catch {
+            // Don't orphan a freshly-created worktree if the engine fails to spawn.
+            if let worktree { try? await worktrees.cleanup(worktree) }
+            throw error
+        }
         let model = RunModel(
             id: handle.id, ticketID: ticketID, sessionID: nil,
-            state: .running, cwd: cwd, discrepancy: nil, lastTkError: nil
+            state: .running, cwd: cwd, worktree: worktree, discrepancy: nil, lastTkError: nil
         )
         store(model)
 
         let stream = handle.events
         Task { await self.consume(stream, runID: handle.id) }
         return handle.id
+    }
+
+    /// Remove a run's worktree on demand (no-op for an explicit-workdir run). Keeps the branch
+    /// unless `deleteBranch` is set.
+    public func cleanupWorktree(_ runID: RunID, deleteBranch: Bool = false) async throws {
+        guard let model = runs[runID] else { throw EngineError.runNotFound(runID) }
+        guard let worktree = model.worktree else { return }
+        try await worktrees.cleanup(worktree, deleteBranch: deleteBranch)
     }
 
     /// Answer a blocked run: resume the engine session first, then clear the waiting markers.
@@ -167,6 +204,7 @@ public actor RunSupervisor {
             settled.state = .canceled
             store(settled)
         }
+        await maybeCleanupWorktree(runID: runID)
     }
 
     private func handle(_ event: AnvilEvent, runID: RunID) async {
@@ -198,6 +236,7 @@ public actor RunSupervisor {
                 done.state = .done(summary: summary)
                 store(done)
             }
+            await maybeCleanupWorktree(runID: runID)
 
         case .failed(let error):
             await markFailed(runID: runID)
@@ -205,6 +244,30 @@ public actor RunSupervisor {
                 failed.state = .failed(error.description)
                 store(failed)
             }
+            await maybeCleanupWorktree(runID: runID)
+        }
+    }
+
+    // Apply the configured cleanup policy once a run reaches a terminal state.
+    private func maybeCleanupWorktree(runID: RunID) async {
+        guard let model = runs[runID], let worktree = model.worktree else { return }
+        let remove: Bool
+        switch cleanupPolicy {
+        case .keep:
+            remove = false
+        case .onSuccess:
+            if case .done = model.state { remove = true } else { remove = false }
+        case .onTerminal:
+            switch model.state {
+            case .done, .failed, .canceled: remove = true
+            default: remove = false
+            }
+        }
+        guard remove else { return }
+        do {
+            try await worktrees.cleanup(worktree)
+        } catch {
+            try? await tk.addNote(Self.bareID(model.ticketID), text: "anvil: worktree cleanup failed — \(error)")
         }
     }
 
@@ -309,6 +372,6 @@ public actor RunSupervisor {
 
     // The engine speaks namespaced ids (`project/slug`); the tk CLI wants the bare slug.
     static func bareID(_ ticketID: String) -> String {
-        ticketID.split(separator: "/").last.map(String.init) ?? ticketID
+        TicketID.slug(ticketID)
     }
 }
