@@ -12,3 +12,8 @@ Thumbs.db
 *~
 .idea/
 .vscode/
+
+# Swift / SwiftPM
+.build/
+.swiftpm/
+*.xcodeproj
