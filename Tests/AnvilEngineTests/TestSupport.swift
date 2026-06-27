@@ -155,3 +155,66 @@ func makeTempDir() throws -> URL {
     try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
     return url
 }
+
+/// Poll `condition` until it holds or the timeout fires.
+func waitUntil(timeout: Double = 15, _ condition: @escaping @Sendable () async -> Bool) async throws {
+    try await withTimeout(timeout) {
+        while !(await condition()) {
+            try? await Task.sleep(nanoseconds: 15_000_000)
+        }
+    }
+}
+
+// MARK: - Stub tk
+
+struct StubTk {
+    let url: URL
+    let argsLog: URL
+}
+
+/// Write a `#!/bin/sh` stub that records each invocation's argv and returns canned YAML
+/// frontmatter for `show` (with `showStatus`). Other subcommands just exit 0. When `failVerb`
+/// is set, that subcommand exits nonzero (to exercise tk write-failure paths).
+func makeStubTk(
+    in dir: URL,
+    showStatus: String = "done",
+    showExit: Int32 = 0,
+    failVerb: String? = nil,
+    failExit: Int32 = 1
+) throws -> StubTk {
+    let scriptURL = dir.appendingPathComponent("tk-stub")
+    let argsLog = dir.appendingPathComponent("tk-args.log")
+
+    var failBlock = ""
+    if let failVerb {
+        failBlock = """
+        if [ "$1" = "\(failVerb)" ]; then
+        printf 'tk stub: forced failure for %s\\n' "\(failVerb)" 1>&2
+        exit \(failExit)
+        fi
+        """
+    }
+
+    let script = """
+    #!/bin/sh
+    printf 'argv: %s\\n' "$*" >> "\(argsLog.path)"
+    \(failBlock)
+    if [ "$1" = "show" ]; then
+    cat <<'TK_SHOW_EOF'
+    ---
+    status: \(showStatus)
+    ---
+    TK_SHOW_EOF
+    exit \(showExit)
+    fi
+    exit 0
+    """
+
+    try script.write(to: scriptURL, atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
+    return StubTk(url: scriptURL, argsLog: argsLog)
+}
+
+func readLog(_ url: URL) -> String {
+    (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+}

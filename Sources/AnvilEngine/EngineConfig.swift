@@ -40,23 +40,9 @@ public struct EngineConfig: Sendable {
     /// context may be missing from its inherited `PATH`. Returns a bare-name URL if nothing
     /// is found; `launch` validates executability and throws a clear error.
     public static func resolveClaudeOnPath() -> URL {
-        let fm = FileManager.default
-        var dirs: [String] = []
-        if let path = ProcessInfo.processInfo.environment["PATH"] {
-            dirs.append(contentsOf: path.split(separator: ":").map(String.init))
-        }
-        let home = fm.homeDirectoryForCurrentUser
-        dirs.append(contentsOf: [
-            "/opt/homebrew/bin",
-            "/usr/local/bin",
-            home.appendingPathComponent(".local/bin").path,
-            home.appendingPathComponent(".claude/local").path,
-        ])
-        for dir in dirs {
-            let candidate = URL(fileURLWithPath: dir).appendingPathComponent("claude")
-            if fm.isExecutableFile(atPath: candidate.path) { return candidate }
-        }
-        return URL(fileURLWithPath: "claude")
+        let claudeLocal = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".claude/local").path
+        return ProcessSupport.resolveExecutable(named: "claude", extraDirectories: [claudeLocal])
     }
 
     /// The headless preamble injected via `--append-system-prompt`. Keeps `/work` pristine

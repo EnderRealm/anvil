@@ -155,7 +155,7 @@ public actor AnvilEngine {
         }
 
         let stderrText = await stderrTask.value
-        let exitCode = await Self.waitForExit(process)
+        let exitCode = await ProcessSupport.waitForExit(process)
         await self.completeProcess(runID: runID, exitCode: exitCode, stderr: stderrText)
     }
 
@@ -198,18 +198,6 @@ public actor AnvilEngine {
                 handle.readabilityHandler = nil
                 try? handle.close()
             }
-        }
-    }
-
-    // `Process.waitUntilExit()` blocks; run it on a dedicated thread so it never competes for
-    // a pooled worker. One short-lived thread per active run.
-    nonisolated private static func waitForExit(_ process: Process) async -> Int32 {
-        await withCheckedContinuation { (continuation: CheckedContinuation<Int32, Never>) in
-            let thread = Thread {
-                process.waitUntilExit()
-                continuation.resume(returning: process.terminationStatus)
-            }
-            thread.start()
         }
     }
 
