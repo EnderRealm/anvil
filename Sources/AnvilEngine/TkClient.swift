@@ -50,8 +50,10 @@ public struct TkClient: Sendable {
         ProcessSupport.resolveExecutable(named: "tk")
     }
 
-    public func show(_ ticketID: String) async throws -> TicketInfo {
-        let output = try await run(["show", ticketID])
+    /// `--repo` scopes a command to a project; required when the process cwd isn't that
+    /// project's repo (the bare slug alone won't resolve from a neutral cwd).
+    public func show(_ ticketID: String, repoURL: URL? = nil) async throws -> TicketInfo {
+        let output = try await run(["show", ticketID] + Self.repoArgs(repoURL))
         guard let status = Self.frontmatterValue("status", in: output.stdout) else {
             throw TkError.unexpectedOutput(command: "show", detail: "no status in frontmatter")
         }
@@ -59,27 +61,72 @@ public struct TkClient: Sendable {
         return TicketInfo(id: id, status: status)
     }
 
-    public func addNote(_ ticketID: String, text: String) async throws {
-        _ = try await run(["add-note", ticketID, text])
+    public func addNote(_ ticketID: String, text: String, repoURL: URL? = nil) async throws {
+        _ = try await run(["add-note", ticketID, text] + Self.repoArgs(repoURL))
     }
 
     /// Set extra fields via `tk edit <id> --set k=v ...`. An empty value removes the key.
-    public func setExtras(_ ticketID: String, _ extras: [String: String]) async throws {
+    public func setExtras(_ ticketID: String, _ extras: [String: String], repoURL: URL? = nil) async throws {
         guard !extras.isEmpty else { return }
         var arguments = ["edit", ticketID]
         for key in extras.keys.sorted() {
             arguments.append("--set")
             arguments.append("\(key)=\(extras[key]!)")
         }
-        _ = try await run(arguments)
+        _ = try await run(arguments + Self.repoArgs(repoURL))
+    }
+
+    /// Update core fields. Scoped to `repoURL` when given.
+    public func edit(
+        _ ticketID: String,
+        repoURL: URL? = nil,
+        status: String? = nil,
+        priority: Int? = nil,
+        title: String? = nil,
+        tags: [String]? = nil
+    ) async throws {
+        var arguments = ["edit", ticketID]
+        if let status { arguments += ["--status", status] }
+        if let priority { arguments += ["--priority", String(priority)] }
+        if let title { arguments += ["--title", title] }
+        if let tags { arguments += ["--tags", tags.joined(separator: ",")] }
+        _ = try await run(arguments + Self.repoArgs(repoURL))
+    }
+
+    /// Create a ticket in the given project repo; returns the new bare slug.
+    public func create(repoURL: URL, title: String, type: String? = nil, priority: Int? = nil) async throws -> String {
+        var arguments = ["create", title]
+        if let type { arguments += ["--type", type] }
+        if let priority { arguments += ["--priority", String(priority)] }
+        let output = try await run(arguments + Self.repoArgs(repoURL))
+        guard let id = Self.frontmatterValue("id", in: output.stdout) else {
+            throw TkError.unexpectedOutput(command: "create", detail: "no id in output")
+        }
+        return id
+    }
+
+    /// Raw `tk query` JSONL (one JSON object per line) for the project whose tickets live at
+    /// `ticketDir` (`<central_root>/tickets/<project>`). Scoped via `TICKETS_DIR` so it works
+    /// for store-only projects too (`--repo` requires a registered store; the ticket dir alone
+    /// is not one).
+    public func query(ticketDir: URL) async throws -> String {
+        let output = try await run(["query"], environment: ["TICKETS_DIR": ticketDir.path])
+        return output.stdout
+    }
+
+    private static func repoArgs(_ repoURL: URL?) -> [String] {
+        guard let repoURL else { return [] }
+        return ["--repo", repoURL.path]
     }
 
     @discardableResult
-    private func run(_ arguments: [String]) async throws -> ProcessSupport.Output {
+    private func run(_ arguments: [String], environment: [String: String]? = nil) async throws -> ProcessSupport.Output {
         guard FileManager.default.isExecutableFile(atPath: executableURL.path) else {
             throw TkError.executableNotFound(executableURL.path)
         }
-        let output = try await ProcessSupport.run(executableURL: executableURL, arguments: arguments)
+        let output = try await ProcessSupport.run(
+            executableURL: executableURL, arguments: arguments, environment: environment
+        )
         guard output.exitCode == 0 else {
             throw TkError.commandFailed(
                 command: arguments.first ?? "?",

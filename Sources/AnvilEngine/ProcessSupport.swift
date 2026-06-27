@@ -10,13 +10,25 @@ enum ProcessSupport {
         let exitCode: Int32
     }
 
-    // Run a short, one-shot command to completion, collecting stdout/stderr.
-    static func run(executableURL: URL, arguments: [String], cwd: URL? = nil) async throws -> Output {
+    // Run a short, one-shot command to completion, collecting stdout/stderr. `environment`
+    // overlays the inherited process environment (e.g. TICKETS_DIR to scope tk to a store).
+    static func run(
+        executableURL: URL,
+        arguments: [String],
+        cwd: URL? = nil,
+        environment: [String: String]? = nil
+    ) async throws -> Output {
         let process = Process()
         process.executableURL = executableURL
         process.arguments = arguments
         if let cwd { process.currentDirectoryURL = cwd }
-        process.environment = ProcessInfo.processInfo.environment
+        if let environment {
+            var merged = ProcessInfo.processInfo.environment
+            for (key, value) in environment { merged[key] = value }
+            process.environment = merged
+        } else {
+            process.environment = ProcessInfo.processInfo.environment
+        }
 
         let outPipe = Pipe()
         let errPipe = Pipe()

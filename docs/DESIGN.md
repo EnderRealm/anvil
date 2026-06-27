@@ -126,14 +126,21 @@ anvil runs a **configurable per-project prepare step** after `git worktree add` 
 tk's central store is already multi-project (`MultiStore`, IDs namespaced
 `project/ticket-id`). anvil is **all-projects by default**.
 
-- **Reads + writes via the `tk` CLI with `--json`** (`tk ls/show/query` to read;
-  `tk edit/add-note/create` to write). The CLI goes through the same store layer as MCP —
-  same timestamping, validation, parent-status propagation — with no daemon. We do **not**
-  parse the markdown ourselves and do **not** run our own `tk serve` (two serve daemons would
-  duel over the store's 5-second git auto-commit/push).
-- **Liveness via FSEvents** on the central store root: re-query on any change. Catches local
-  edits, other agents, and tickets pulled in by the existing global `tk serve`'s git sync.
-  anvil can `tk sync` after its own writes.
+- **Reads via `tk query` (JSONL), writes via `tk edit/add-note/create`** — through the same
+  store layer as MCP (timestamping, validation, parent-status propagation), no daemon, no
+  markdown parsing of our own, and **never our own `tk serve`** (two serve daemons would duel
+  over the store's 5-second git auto-commit/push). Verified `tk` realities: `tk show` ignores
+  `--json` (YAML frontmatter); `tk query` emits JSONL with extras flattened to top level; the
+  CLI wants the **bare slug** (not the namespaced id), and per-project reads are scoped with
+  `TICKETS_DIR=<central_root>/tickets/<project>` (cloned projects can also use `--repo <repo>`).
+  `ready`/`blocked`/`inbox`/`store-info` are MCP-only, so anvil **computes them client-side**
+  from the full ticket set and derives store layout from the central store + `config.yaml`.
+  The `anvil-state` extras anvil writes (F3) surface in `tk query` as the file-backed
+  needs-intervention signal.
+- **Liveness via FSEvents** (debounced) on the central store root: re-query on any change —
+  local edits, other agents, and tickets pulled in by the existing global `tk serve`'s git
+  sync. Browse reads **every** project's ticket dir under the central store (cloned or not);
+  cloning only gates launch. anvil can `tk sync` after its own writes.
 - **Browse = all projects; launchable = projects with a ticket AND a local repo path.** The
   worktree repo path comes from `~/.ticket/config.yaml` `projects[<project>].path`;
   `ticket_store_info` gives ticket *dirs* (not repos) and lists more projects than are cloned

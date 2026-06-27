@@ -172,15 +172,18 @@ struct StubTk {
     let argsLog: URL
 }
 
-/// Write a `#!/bin/sh` stub that records each invocation's argv and returns canned YAML
-/// frontmatter for `show` (with `showStatus`). Other subcommands just exit 0. When `failVerb`
-/// is set, that subcommand exits nonzero (to exercise tk write-failure paths).
+/// Write a `#!/bin/sh` stub mirroring real `tk`: records argv (and `TICKETS_DIR` for `query`),
+/// emits YAML frontmatter for `show`, and JSONL for `query`. `queryJSONL` returns the same
+/// JSONL for any store; `queryByProject` (keyed by the `TICKETS_DIR` basename) returns
+/// per-project JSONL. When `failVerb` is set, that subcommand exits nonzero.
 func makeStubTk(
     in dir: URL,
     showStatus: String = "done",
     showExit: Int32 = 0,
     failVerb: String? = nil,
-    failExit: Int32 = 1
+    failExit: Int32 = 1,
+    queryJSONL: String? = nil,
+    queryByProject: [String: String]? = nil
 ) throws -> StubTk {
     let scriptURL = dir.appendingPathComponent("tk-stub")
     let argsLog = dir.appendingPathComponent("tk-args.log")
@@ -195,10 +198,43 @@ func makeStubTk(
         """
     }
 
+    var emit = ""
+    if let queryByProject {
+        for (project, jsonl) in queryByProject.sorted(by: { $0.key < $1.key }) {
+            emit += """
+            if [ "$base" = "\(project)" ]; then
+            cat <<'TK_Q_\(project)_EOF'
+            \(jsonl)
+            TK_Q_\(project)_EOF
+            fi
+
+            """
+        }
+    } else if let queryJSONL {
+        emit = """
+        cat <<'TK_QUERY_EOF'
+        \(queryJSONL)
+        TK_QUERY_EOF
+        """
+    }
+
+    var queryBlock = ""
+    if !emit.isEmpty {
+        queryBlock = """
+        if [ "$1" = "query" ]; then
+        printf 'query tdir=%s\\n' "$TICKETS_DIR" >> "\(argsLog.path)"
+        base=`basename "$TICKETS_DIR"`
+        \(emit)
+        exit 0
+        fi
+        """
+    }
+
     let script = """
     #!/bin/sh
     printf 'argv: %s\\n' "$*" >> "\(argsLog.path)"
     \(failBlock)
+    \(queryBlock)
     if [ "$1" = "show" ]; then
     cat <<'TK_SHOW_EOF'
     ---
@@ -269,9 +305,9 @@ func makeGitRepo(in dir: URL, withEnv: Bool = true, withPrepareHook: Bool = true
     return repo
 }
 
-/// Write a tk `config.yaml` mapping projects to repo paths, for engine repo resolution.
-func writeTicketConfig(_ projects: [String: URL], in dir: URL) throws -> URL {
-    var lines = ["central_root: /tmp/store", "projects:"]
+/// Write a tk `config.yaml` mapping projects to repo paths, for engine/data-layer resolution.
+func writeTicketConfig(_ projects: [String: URL], centralRoot: URL? = nil, in dir: URL) throws -> URL {
+    var lines = ["central_root: \(centralRoot?.path ?? "/tmp/store")", "projects:"]
     for (name, url) in projects.sorted(by: { $0.key < $1.key }) {
         lines.append("    \(name):")
         lines.append("        path: \(url.path)")
