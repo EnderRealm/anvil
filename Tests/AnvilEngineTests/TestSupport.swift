@@ -222,7 +222,6 @@ func makeStubTk(
     if !emit.isEmpty {
         queryBlock = """
         if [ "$1" = "query" ]; then
-        printf 'query tdir=%s\\n' "$TICKETS_DIR" >> "\(argsLog.path)"
         base=`basename "$TICKETS_DIR"`
         \(emit)
         exit 0
@@ -230,9 +229,10 @@ func makeStubTk(
         """
     }
 
+    // Log argv AND the TICKETS_DIR scope for every call so tests can assert scoping.
     let script = """
     #!/bin/sh
-    printf 'argv: %s\\n' "$*" >> "\(argsLog.path)"
+    printf 'argv: %s | tdir=%s\\n' "$*" "$TICKETS_DIR" >> "\(argsLog.path)"
     \(failBlock)
     \(queryBlock)
     if [ "$1" = "show" ]; then

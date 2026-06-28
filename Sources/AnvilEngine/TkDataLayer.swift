@@ -47,16 +47,36 @@ public struct StoreInfo: Sendable, Equatable {
     public let projects: [ProjectInfo]
 }
 
+/// Full ticket read for the detail/grooming pane: frontmatter + markdown body sections.
+/// `tk show` emits YAML+markdown (not JSON), so this is parsed from that text.
+public struct TicketDetail: Sendable, Equatable {
+    public let id: String
+    public let project: String
+    public let title: String
+    public let status: String
+    public let type: String
+    public let priority: Int
+    public let parent: String?
+    public let deps: [String]
+    public let tags: [String]
+    public let description: String          // the "why" — text after the title, before sections
+    public let acceptanceCriteria: String?  // "## Acceptance Criteria" (read-only: no CLI write)
+    public let design: String?              // "## Design"
+    public let notes: [String]              // "## Notes" entries
+}
+
 public enum TkDataError: Error, Sendable, CustomStringConvertible, LocalizedError {
     case configUnreadable(String)
     case configInvalid(String)
     case projectNotLaunchable(String)
+    case ticketUnavailable(String)
 
     public var description: String {
         switch self {
         case .configUnreadable(let path): return "could not read tk config at '\(path)'"
         case .configInvalid(let detail): return "invalid tk config: \(detail)"
         case .projectNotLaunchable(let project): return "project '\(project)' has no local repo path"
+        case .ticketUnavailable(let id): return "ticket '\(id)' is not available in the store"
         }
     }
     public var errorDescription: String? { description }
@@ -183,6 +203,18 @@ public actor TkDataLayer {
         return Self.parse(try await tk.query(ticketDir: ticketDir), project: project)
     }
 
+    /// Full ticket (frontmatter + body) for the detail/grooming pane. Works for any project in
+    /// the store (scoped by ticket dir).
+    public func ticketDetail(id: String) async throws -> TicketDetail {
+        let project = TicketID.project(id)
+        guard let info = try storeInfo().projects.first(where: { $0.name == project }),
+              let ticketDir = info.ticketDir else {
+            throw TkDataError.ticketUnavailable(id)
+        }
+        let raw = try await tk.showRaw(TicketID.slug(id), ticketDir: ticketDir)
+        return Self.parseDetail(raw, id: id)
+    }
+
     public func ready() async throws -> [TicketSummary] {
         Self.readyBlocked(try await allTickets()).ready
     }
@@ -197,20 +229,34 @@ public actor TkDataLayer {
         try await allTickets().filter { ($0.anvilState?.isEmpty == false) }
     }
 
-    // MARK: - Writes (delegate to TkClient, bare slug + project scope)
+    // MARK: - Writes (delegate to TkClient, bare slug + ticket-dir scope)
+    //
+    // Grooming writes scope by the ticket dir (TICKETS_DIR), which works for ANY project in the
+    // store — including uncloned ones. Clone-ness gates LAUNCH (worktrees), not grooming.
 
     public func addNote(ticketID: String, text: String) async throws {
-        try await tk.addNote(TicketID.slug(ticketID), text: text, repoURL: try projectRepo(ticketID))
+        try await tk.addNote(TicketID.slug(ticketID), text: text, ticketDir: try ticketDir(for: ticketID))
     }
 
     public func setExtras(ticketID: String, _ extras: [String: String]) async throws {
-        try await tk.setExtras(TicketID.slug(ticketID), extras, repoURL: try projectRepo(ticketID))
+        try await tk.setExtras(TicketID.slug(ticketID), extras, ticketDir: try ticketDir(for: ticketID))
     }
 
     public func setStatus(ticketID: String, _ status: String) async throws {
-        try await tk.edit(TicketID.slug(ticketID), repoURL: try projectRepo(ticketID), status: status)
+        try await tk.edit(TicketID.slug(ticketID), ticketDir: try ticketDir(for: ticketID), status: status)
     }
 
+    public func setPriority(ticketID: String, _ priority: Int) async throws {
+        try await tk.edit(TicketID.slug(ticketID), ticketDir: try ticketDir(for: ticketID), priority: priority)
+    }
+
+    /// Set the "why" (description). tk has no flag for acceptance criteria, so "success" is
+    /// read-only in the UI.
+    public func setDescription(ticketID: String, _ text: String) async throws {
+        try await tk.edit(TicketID.slug(ticketID), ticketDir: try ticketDir(for: ticketID), description: text)
+    }
+
+    /// Create requires a registered project repo (you create where you can work).
     @discardableResult
     public func create(project: String, title: String, type: String? = nil, priority: Int? = nil) async throws -> String {
         let repo = try projectRepo("\(project)/_")
@@ -225,6 +271,15 @@ public actor TkDataLayer {
             throw TkDataError.projectNotLaunchable(project)
         }
         return URL(fileURLWithPath: path, isDirectory: true)
+    }
+
+    private func ticketDir(for ticketID: String) throws -> URL {
+        let project = TicketID.project(ticketID)
+        guard let info = try storeInfo().projects.first(where: { $0.name == project }),
+              let dir = info.ticketDir else {
+            throw TkDataError.ticketUnavailable(ticketID)
+        }
+        return dir
     }
 
     // MARK: - Parsing + actionability
@@ -262,7 +317,7 @@ public actor TkDataLayer {
     /// tk's actionability logic, computed locally:
     /// - ready: non-terminal, non-backlog, all deps terminal, full parent chain active.
     /// - blocked: non-terminal, non-backlog, with a non-terminal or missing dep.
-    static func readyBlocked(_ tickets: [TicketSummary]) -> (ready: [TicketSummary], blocked: [TicketSummary]) {
+    public static func readyBlocked(_ tickets: [TicketSummary]) -> (ready: [TicketSummary], blocked: [TicketSummary]) {
         let byID = Dictionary(tickets.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         var ready: [TicketSummary] = []
         var blocked: [TicketSummary] = []
@@ -293,5 +348,134 @@ public actor TkDataLayer {
             current = parent
         }
         return true
+    }
+
+    // MARK: - `tk show` detail parsing
+
+    static func parseDetail(_ showOutput: String, id: String) -> TicketDetail {
+        let project = TicketID.project(id)
+        let (frontmatter, body) = splitFrontmatter(showOutput)
+        let (title, description, sections) = parseBody(body)
+
+        func section(_ name: String) -> String? {
+            sections.first { $0.heading.caseInsensitiveCompare(name) == .orderedSame }?.body
+        }
+        let notesSection = section("Notes")
+
+        return TicketDetail(
+            id: id,
+            project: project,
+            title: title,
+            status: frontmatterScalar("status", frontmatter) ?? "backlog",
+            type: frontmatterScalar("type", frontmatter) ?? "feature",
+            priority: frontmatterScalar("priority", frontmatter).flatMap(Int.init) ?? 2,
+            parent: frontmatterScalar("parent", frontmatter),
+            deps: frontmatterList("deps", frontmatter),
+            tags: frontmatterList("tags", frontmatter),
+            description: description,
+            acceptanceCriteria: section("Acceptance Criteria"),
+            design: section("Design"),
+            notes: notesSection.map(parseNotes) ?? []
+        )
+    }
+
+    // Body = everything after the second `---`. Frontmatter = lines between the two `---`.
+    private static func splitFrontmatter(_ text: String) -> (frontmatter: String, body: String) {
+        let lines = text.components(separatedBy: "\n")
+        guard lines.first?.trimmingCharacters(in: .whitespaces) == "---" else {
+            return ("", text)
+        }
+        var end = -1
+        for i in 1..<lines.count where lines[i].trimmingCharacters(in: .whitespaces) == "---" {
+            end = i
+            break
+        }
+        guard end > 0 else { return ("", text) }
+        let frontmatter = lines[1..<end].joined(separator: "\n")
+        let body = lines[(end + 1)...].joined(separator: "\n")
+        return (frontmatter, body)
+    }
+
+    private static func frontmatterScalar(_ key: String, _ frontmatter: String) -> String? {
+        let prefix = key + ":"
+        for line in frontmatter.components(separatedBy: "\n") {
+            let t = line.trimmingCharacters(in: .whitespaces)
+            if t.hasPrefix(prefix) {
+                let value = t.dropFirst(prefix.count).trimmingCharacters(in: .whitespaces)
+                return value.isEmpty ? nil : value
+            }
+        }
+        return nil
+    }
+
+    // YAML inline list, e.g. `deps: [a, b]` or `tags: []`.
+    private static func frontmatterList(_ key: String, _ frontmatter: String) -> [String] {
+        guard var value = frontmatterScalar(key, frontmatter) else { return [] }
+        if value.hasPrefix("[") { value.removeFirst() }
+        if value.hasSuffix("]") { value.removeLast() }
+        return value.split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+    }
+
+    // Markdown body: first `# ` is the title; text up to the first `## ` is the description;
+    // each `## Heading` opens a section.
+    static func parseBody(_ body: String) -> (title: String, description: String, sections: [(heading: String, body: String)]) {
+        var title = ""
+        var descriptionLines: [String] = []
+        var sections: [(heading: String, body: String)] = []
+        var heading: String?
+        var sectionLines: [String] = []
+
+        func flush() {
+            if let heading {
+                sections.append((heading, sectionLines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)))
+            }
+            sectionLines = []
+        }
+
+        for line in body.components(separatedBy: "\n") {
+            if heading == nil, title.isEmpty, line.hasPrefix("# ") {
+                title = String(line.dropFirst(2)).trimmingCharacters(in: .whitespaces)
+            } else if line.hasPrefix("## ") {
+                flush()
+                heading = String(line.dropFirst(3)).trimmingCharacters(in: .whitespaces)
+            } else if heading == nil {
+                descriptionLines.append(line)
+            } else {
+                sectionLines.append(line)
+            }
+        }
+        flush()
+        let description = descriptionLines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        return (title, description, sections)
+    }
+
+    // Notes section: timestamped blocks `**<timestamp>**` followed by body text.
+    static func parseNotes(_ section: String) -> [String] {
+        var notes: [String] = []
+        var current: [String] = []
+        var started = false
+        func flush() {
+            let text = current.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+            if !text.isEmpty { notes.append(text) }
+            current = []
+        }
+        for line in section.components(separatedBy: "\n") {
+            let t = line.trimmingCharacters(in: .whitespaces)
+            if t.hasPrefix("**"), t.hasSuffix("**"), t.count >= 4 {
+                flush()
+                started = true
+            } else if started {
+                current.append(line)
+            }
+        }
+        flush()
+        // No timestamp markers (plain note body) — treat the whole section as one note.
+        if notes.isEmpty {
+            let whole = section.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !whole.isEmpty { notes.append(whole) }
+        }
+        return notes
     }
 }

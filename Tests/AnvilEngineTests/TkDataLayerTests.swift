@@ -158,8 +158,8 @@ final class TkDataLayerTests: XCTestCase {
 
         // query was scoped per project ticket dir (TICKETS_DIR), not --repo.
         let log = readLog(stub.argsLog)
-        XCTAssertTrue(log.contains("query tdir=\(central.path)/tickets/proja"), log)
-        XCTAssertTrue(log.contains("query tdir=\(central.path)/tickets/projb"), log)
+        XCTAssertTrue(log.contains("argv: query | tdir=\(central.path)/tickets/proja"), log)
+        XCTAssertTrue(log.contains("argv: query | tdir=\(central.path)/tickets/projb"), log)
     }
 
     func testAllTicketsCoversStoreOnlyProjectAndCrossProjectDep() async throws {
@@ -230,7 +230,8 @@ final class TkDataLayerTests: XCTestCase {
         let initOut = try await runTkLive(
             ["init", "--project", "liveproj", "--central-root", central.path, "--yes"], cwd: repo, home: home)
         XCTAssertEqual(initOut.exitCode, 0, initOut.stderr)
-        let createOut = try await runTkLive(["create", "Live ticket", "--type", "feature"], cwd: repo, home: home)
+        // Create with an explicit priority 0 to pin tk's real type/scale (0 = critical).
+        let createOut = try await runTkLive(["create", "Live ticket", "--type", "feature", "--priority", "0"], cwd: repo, home: home)
         XCTAssertEqual(createOut.exitCode, 0, createOut.stderr)
         let bare = try XCTUnwrap(TkClient.frontmatterValue("id", in: createOut.stdout))
         _ = try await runTkLive(["edit", bare, "--set", "anvil-state=needs-input", "--status", "open"], cwd: repo, home: home)
@@ -243,28 +244,34 @@ final class TkDataLayerTests: XCTestCase {
         let ticket = try XCTUnwrap(all.first { $0.id == "liveproj/\(bare)" }, "ids=\(all.map(\.id))")
         XCTAssertEqual(ticket.status, "open")
         XCTAssertEqual(ticket.anvilState, "needs-input")
+        XCTAssertEqual(ticket.priority, 0, "real tk priority must round-trip as an integer (0 = critical)")
 
         let inbox = try await layer.inbox()
         XCTAssertTrue(inbox.contains { $0.id == "liveproj/\(bare)" }, "inbox=\(inbox.map(\.id))")
     }
 
-    // MARK: writes route to the bare slug + project repo
+    // MARK: writes route to the bare slug + ticket-dir scope (works for browse-only projects)
 
-    func testWritesUseBareSlugAndRepoScope() async throws {
+    func testGroomingWritesViaTicketDirForBrowseOnlyProject() async throws {
         let dir = try makeTempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
-        let repoA = dir.appendingPathComponent("repoA", isDirectory: true)
-        try FileManager.default.createDirectory(at: repoA, withIntermediateDirectories: true)
-        let configURL = try writeTicketConfig(["proja": repoA], in: dir)
+        let central = dir.appendingPathComponent("store", isDirectory: true)
+        let ticketsDir = central.appendingPathComponent("tickets", isDirectory: true)
+        // "groomonly" has tickets in the store but NO config repo path (browse-only).
+        try FileManager.default.createDirectory(
+            at: ticketsDir.appendingPathComponent("groomonly"), withIntermediateDirectories: true)
+        let configURL = try writeTicketConfig([:], centralRoot: central, in: dir)
         let stub = try makeStubTk(in: dir)
         let layer = TkDataLayer(tk: TkClient(executableURL: stub.url), configURL: configURL)
 
-        try await layer.setStatus(ticketID: "proja/alpha-1234", "open")
-        try await layer.addNote(ticketID: "proja/alpha-1234", text: "hi")
+        try await layer.setStatus(ticketID: "groomonly/alpha-1234", "open")
+        try await layer.addNote(ticketID: "groomonly/alpha-1234", text: "hi")
 
+        // Bare slug + TICKETS_DIR scope (no --repo) — grooming works without a clone.
         let log = readLog(stub.argsLog)
-        XCTAssertTrue(log.contains("edit alpha-1234 --status open --repo \(repoA.path)"), log)
-        XCTAssertTrue(log.contains("add-note alpha-1234 hi --repo \(repoA.path)"), log)
-        XCTAssertFalse(log.contains("proja/alpha-1234"), log)
+        XCTAssertTrue(log.contains("edit alpha-1234 --status open | tdir=\(central.path)/tickets/groomonly"), log)
+        XCTAssertTrue(log.contains("add-note alpha-1234 hi | tdir=\(central.path)/tickets/groomonly"), log)
+        XCTAssertFalse(log.contains("groomonly/alpha-1234"), log)
+        XCTAssertFalse(log.contains("--repo"), log)
     }
 }

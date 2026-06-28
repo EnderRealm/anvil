@@ -61,36 +61,53 @@ public struct TkClient: Sendable {
         return TicketInfo(id: id, status: status)
     }
 
-    public func addNote(_ ticketID: String, text: String, repoURL: URL? = nil) async throws {
-        _ = try await run(["add-note", ticketID, text] + Self.repoArgs(repoURL))
+    /// Per-ticket ops accept either `repoURL` (`--repo`) or `ticketDir` (`TICKETS_DIR`).
+    /// `ticketDir` works for any project in the store, including uncloned ones.
+    public func addNote(_ ticketID: String, text: String, repoURL: URL? = nil, ticketDir: URL? = nil) async throws {
+        _ = try await run(["add-note", ticketID, text] + Self.repoArgs(repoURL), environment: Self.dirEnv(ticketDir))
     }
 
     /// Set extra fields via `tk edit <id> --set k=v ...`. An empty value removes the key.
-    public func setExtras(_ ticketID: String, _ extras: [String: String], repoURL: URL? = nil) async throws {
+    public func setExtras(_ ticketID: String, _ extras: [String: String], repoURL: URL? = nil, ticketDir: URL? = nil) async throws {
         guard !extras.isEmpty else { return }
         var arguments = ["edit", ticketID]
         for key in extras.keys.sorted() {
             arguments.append("--set")
             arguments.append("\(key)=\(extras[key]!)")
         }
-        _ = try await run(arguments + Self.repoArgs(repoURL))
+        _ = try await run(arguments + Self.repoArgs(repoURL), environment: Self.dirEnv(ticketDir))
     }
 
-    /// Update core fields. Scoped to `repoURL` when given.
+    /// Update core fields. Scoped to `repoURL` or `ticketDir`. Note: tk has no flag for the
+    /// acceptance-criteria / design body sections — only `--description` (the "why").
     public func edit(
         _ ticketID: String,
         repoURL: URL? = nil,
+        ticketDir: URL? = nil,
         status: String? = nil,
         priority: Int? = nil,
         title: String? = nil,
+        description: String? = nil,
         tags: [String]? = nil
     ) async throws {
         var arguments = ["edit", ticketID]
         if let status { arguments += ["--status", status] }
         if let priority { arguments += ["--priority", String(priority)] }
         if let title { arguments += ["--title", title] }
+        if let description { arguments += ["--description", description] }
         if let tags { arguments += ["--tags", tags.joined(separator: ",")] }
-        _ = try await run(arguments + Self.repoArgs(repoURL))
+        _ = try await run(arguments + Self.repoArgs(repoURL), environment: Self.dirEnv(ticketDir))
+    }
+
+    private static func dirEnv(_ ticketDir: URL?) -> [String: String]? {
+        ticketDir.map { ["TICKETS_DIR": $0.path] }
+    }
+
+    /// Raw `tk show` output (YAML frontmatter + markdown body) for a ticket, scoped by ticket
+    /// dir so it works for any project.
+    public func showRaw(_ ticketID: String, ticketDir: URL) async throws -> String {
+        let output = try await run(["show", ticketID], environment: ["TICKETS_DIR": ticketDir.path])
+        return output.stdout
     }
 
     /// Create a ticket in the given project repo; returns the new bare slug.

@@ -39,6 +39,10 @@ public struct RunModel: Sendable, Equatable {
     public var discrepancy: String?
     /// Most recent tk side-effect failure, if any.
     public var lastTkError: String?
+    /// Bounded transcript of the agent's text output (tail-capped) for the run view.
+    public var output: String = ""
+    /// Latest token/cost/rate-limit telemetry.
+    public var usage: Usage? = nil
 }
 
 public enum SupervisorEvent: Sendable {
@@ -215,8 +219,17 @@ public actor RunSupervisor {
             model.state = .running
             store(model)
 
-        case .output, .usage:
-            break
+        case .output(let text):
+            if var updated = runs[runID] {
+                updated.output = Self.appendCapped(updated.output, text)
+                store(updated)
+            }
+
+        case .usage(let usage):
+            if var updated = runs[runID] {
+                updated.usage = usage
+                store(updated)
+            }
 
         case .needsInput(let question, let options):
             let pending = PendingInput(
@@ -373,5 +386,13 @@ public actor RunSupervisor {
     // The engine speaks namespaced ids (`project/slug`); the tk CLI wants the bare slug.
     static func bareID(_ ticketID: String) -> String {
         TicketID.slug(ticketID)
+    }
+
+    // Append output, keeping only the tail so a long run can't grow the model unbounded.
+    static let outputCap = 16_000
+    static func appendCapped(_ existing: String, _ addition: String) -> String {
+        let combined = existing + addition
+        guard combined.count > outputCap else { return combined }
+        return String(combined.suffix(outputCap))
     }
 }
