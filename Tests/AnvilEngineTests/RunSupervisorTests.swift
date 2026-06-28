@@ -383,7 +383,7 @@ final class RunSupervisorTests: XCTestCase {
             executableURL: tk.executableURL,
             arguments: [
                 "create", "THROWAWAY anvil live-e2e — delete me",
-                "--type", "feature", "--status", "open",
+                "--type", "feature",
                 "-d", "Pick the database for the throwaway feature. You MUST ask the human to choose between 'postgres' and 'sqlite' before doing anything else; do not decide yourself.",
             ],
             cwd: repo
