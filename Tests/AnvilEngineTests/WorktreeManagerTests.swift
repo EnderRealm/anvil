@@ -148,6 +148,7 @@ final class WorktreeManagerTests: XCTestCase {
             tk: TkClient(executableURL: tk.url),
             worktrees: WorktreeManager(worktreeRoot: root),
             cleanupPolicy: cleanupPolicy,
+            configURL: configURL,
             hostName: "test-host"
         )
     }

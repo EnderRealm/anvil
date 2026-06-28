@@ -66,6 +66,7 @@ public actor RunSupervisor {
     private let tk: TkClient
     private let worktrees: WorktreeManager
     private let cleanupPolicy: WorktreeCleanup
+    private let configURL: URL
     private let hostName: String
 
     private var runs: [RunID: RunModel] = [:]
@@ -79,13 +80,26 @@ public actor RunSupervisor {
         tk: TkClient,
         worktrees: WorktreeManager = WorktreeManager(),
         cleanupPolicy: WorktreeCleanup = .keep,
+        configURL: URL = EngineConfig.defaultTicketConfigURL(),
         hostName: String = ProcessInfo.processInfo.hostName
     ) {
         self.engine = engine
         self.tk = tk
         self.worktrees = worktrees
         self.cleanupPolicy = cleanupPolicy
+        self.configURL = configURL
         self.hostName = hostName
+    }
+
+    // Scope mirroring writes/reads to the ticket's own project via TICKETS_DIR
+    // (`<central_root>/tickets/<project>`) — a bare slug alone won't resolve from a neutral cwd
+    // and can hit the wrong project. Same source TkDataLayer uses.
+    private func ticketDir(forTicket ticketID: String) -> URL? {
+        guard let yaml = try? String(contentsOf: configURL, encoding: .utf8),
+              let root = RepoResolver.centralRoot(inYAML: yaml) else { return nil }
+        return URL(fileURLWithPath: root, isDirectory: true)
+            .appendingPathComponent("tickets", isDirectory: true)
+            .appendingPathComponent(TicketID.project(ticketID), isDirectory: true)
     }
 
     /// A fresh event stream for one observer. Each caller gets every event (no competition for
@@ -166,8 +180,7 @@ public actor RunSupervisor {
         // re-block enqueue for this run cannot be wiped by a trailing dequeue. Markers stay
         // intact on a throwing resume because both lines are reached only after resume succeeds.
         dequeue(runID)
-        let bare = Self.bareID(model.ticketID)
-        do { try await clearWaitingExtras(bare) } catch { recordTkError(runID, error) }
+        do { try await clearWaitingExtras(model.ticketID) } catch { recordTkError(runID, error) }
     }
 
     // MARK: - Observable model
@@ -199,8 +212,8 @@ public actor RunSupervisor {
         let bare = Self.bareID(model.ticketID)
         dequeue(runID)
         do {
-            try await clearWaitingExtras(bare)
-            try await tk.addNote(bare, text: "anvil: run ended without completing — canceled")
+            try await clearWaitingExtras(model.ticketID)
+            try await tk.addNote(bare, text: "anvil: run ended without completing — canceled", ticketDir: ticketDir(forTicket: model.ticketID))
         } catch {
             recordTkError(runID, error)
         }
@@ -280,7 +293,7 @@ public actor RunSupervisor {
         do {
             try await worktrees.cleanup(worktree)
         } catch {
-            try? await tk.addNote(Self.bareID(model.ticketID), text: "anvil: worktree cleanup failed — \(error)")
+            try? await tk.addNote(Self.bareID(model.ticketID), text: "anvil: worktree cleanup failed — \(error)", ticketDir: ticketDir(forTicket: model.ticketID))
         }
     }
 
@@ -288,8 +301,9 @@ public actor RunSupervisor {
 
     private func mirrorBlocked(_ pending: PendingInput) async {
         let bare = Self.bareID(pending.ticketID)
+        let dir = ticketDir(forTicket: pending.ticketID)
         do {
-            try await tk.addNote(bare, text: "anvil: needs input — \(pending.question)")
+            try await tk.addNote(bare, text: "anvil: needs input — \(pending.question)", ticketDir: dir)
             // Ticket stays `open`; only the break-glass pointer changes.
             try await tk.setExtras(bare, [
                 AnvilTicketKey.state: AnvilTicketState.needsInput,
@@ -297,7 +311,7 @@ public actor RunSupervisor {
                 AnvilTicketKey.session: pending.sessionID,
                 AnvilTicketKey.worktree: pending.cwd.path,
                 AnvilTicketKey.host: hostName,
-            ])
+            ], ticketDir: dir)
         } catch {
             recordTkError(pending.runID, error)
         }
@@ -306,16 +320,17 @@ public actor RunSupervisor {
     private func reconcileDone(runID: RunID, summary: String?) async {
         guard let model = runs[runID] else { return }
         let bare = Self.bareID(model.ticketID)
+        let dir = ticketDir(forTicket: model.ticketID)
         dequeue(runID)
         do {
-            try await clearWaitingExtras(bare)
+            try await clearWaitingExtras(model.ticketID)
             let suffix = summary.map { " — \($0)" } ?? ""
-            try await tk.addNote(bare, text: "anvil: run reported done\(suffix)")
+            try await tk.addNote(bare, text: "anvil: run reported done\(suffix)", ticketDir: dir)
             // Cross-check: real /work sets status=done. Don't trust the sentinel alone.
-            let info = try await tk.show(bare)
+            let info = try await tk.show(bare, ticketDir: dir)
             if info.status != "done" {
                 runs[runID]?.discrepancy = "run reported done but tk status is '\(info.status)'"
-                try await tk.addNote(bare, text: "anvil: WARNING — run reported done but ticket status is '\(info.status)'")
+                try await tk.addNote(bare, text: "anvil: WARNING — run reported done but ticket status is '\(info.status)'", ticketDir: dir)
             }
         } catch {
             recordTkError(runID, error)
@@ -325,6 +340,7 @@ public actor RunSupervisor {
     private func markFailed(runID: RunID) async {
         guard let model = runs[runID] else { return }
         let bare = Self.bareID(model.ticketID)
+        let dir = ticketDir(forTicket: model.ticketID)
         dequeue(runID)
         do {
             try await tk.setExtras(bare, [
@@ -333,28 +349,28 @@ public actor RunSupervisor {
                 AnvilTicketKey.session: "",
                 AnvilTicketKey.worktree: "",
                 AnvilTicketKey.host: "",
-            ])
-            try await tk.addNote(bare, text: "anvil: run failed")
+            ], ticketDir: dir)
+            try await tk.addNote(bare, text: "anvil: run failed", ticketDir: dir)
             // Cross-check: a nonzero exit after /work had already set status=done is a
             // discrepancy worth flagging.
-            let info = try await tk.show(bare)
+            let info = try await tk.show(bare, ticketDir: dir)
             if info.status == "done" {
                 runs[runID]?.discrepancy = "run failed but tk status is 'done'"
-                try await tk.addNote(bare, text: "anvil: WARNING — run failed but ticket status is 'done'")
+                try await tk.addNote(bare, text: "anvil: WARNING — run failed but ticket status is 'done'", ticketDir: dir)
             }
         } catch {
             recordTkError(runID, error)
         }
     }
 
-    private func clearWaitingExtras(_ bareID: String) async throws {
-        try await tk.setExtras(bareID, [
+    private func clearWaitingExtras(_ ticketID: String) async throws {
+        try await tk.setExtras(Self.bareID(ticketID), [
             AnvilTicketKey.state: "",
             AnvilTicketKey.question: "",
             AnvilTicketKey.session: "",
             AnvilTicketKey.worktree: "",
             AnvilTicketKey.host: "",
-        ])
+        ], ticketDir: ticketDir(forTicket: ticketID))
     }
 
     // MARK: - State plumbing

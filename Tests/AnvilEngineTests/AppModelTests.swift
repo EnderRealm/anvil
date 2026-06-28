@@ -96,7 +96,8 @@ final class AppModelTests: XCTestCase {
         let engine = AnvilEngine(config: EngineConfig(claudeExecutableURL: claude.url, ticketConfigURL: store.configURL))
         let supervisor = RunSupervisor(
             engine: engine, tk: TkClient(executableURL: store.stub.url),
-            worktrees: WorktreeManager(worktreeRoot: dir.appendingPathComponent("wt")), cleanupPolicy: .keep)
+            worktrees: WorktreeManager(worktreeRoot: dir.appendingPathComponent("wt")),
+            cleanupPolicy: .keep, configURL: store.configURL)
         let model = AppModel(dataLayer: dataLayer, supervisor: supervisor)
 
         await model.start(watch: false)
@@ -126,7 +127,8 @@ final class AppModelTests: XCTestCase {
         let engine = AnvilEngine(config: EngineConfig(claudeExecutableURL: missingClaude, ticketConfigURL: store.configURL))
         let supervisor = RunSupervisor(
             engine: engine, tk: TkClient(executableURL: store.stub.url),
-            worktrees: WorktreeManager(worktreeRoot: dir.appendingPathComponent("wt")), cleanupPolicy: .keep)
+            worktrees: WorktreeManager(worktreeRoot: dir.appendingPathComponent("wt")),
+            cleanupPolicy: .keep, configURL: store.configURL)
         let model = AppModel(
             dataLayer: TkDataLayer(tk: TkClient(executableURL: store.stub.url), configURL: store.configURL),
             supervisor: supervisor)

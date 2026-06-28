@@ -10,14 +10,21 @@ final class RunSupervisorTests: XCTestCase {
     private let failedExtras =
         "anvil-host= --set anvil-question= --set anvil-session= --set anvil-state=failed --set anvil-worktree="
 
+    // Hermetic config so mirroring scopes by TICKETS_DIR=<dir>/store/tickets/<project>.
     private func makeSupervisor(
         claude: StubClaude,
         tk: StubTk,
+        dir: URL,
         host: String = "test-host"
-    ) -> RunSupervisor {
+    ) throws -> RunSupervisor {
+        let configURL = try writeTicketConfig([:], centralRoot: dir.appendingPathComponent("store"), in: dir)
         let engine = AnvilEngine(config: EngineConfig(claudeExecutableURL: claude.url))
         let client = TkClient(executableURL: tk.url)
-        return RunSupervisor(engine: engine, tk: client, hostName: host)
+        return RunSupervisor(engine: engine, tk: client, configURL: configURL, hostName: host)
+    }
+
+    private func ticketDirArg(_ dir: URL, _ project: String) -> String {
+        "tdir=\(dir.appendingPathComponent("store").path)/tickets/\(project)"
     }
 
     // MARK: launch -> block
@@ -32,7 +39,7 @@ final class RunSupervisorTests: XCTestCase {
             resultLine(needsInputBlock(question: "Which database engine", options: ["postgres", "sqlite"]), sessionID: sid),
         ].joined(separator: "\n"))
         let tk = try makeStubTk(in: dir)
-        let supervisor = makeSupervisor(claude: claude, tk: tk)
+        let supervisor = try makeSupervisor(claude: claude, tk: tk, dir: dir)
 
         let runID = try await supervisor.launch(ticketID: "demo/sample-block-1234", workdir: dir)
         try await waitUntil { await supervisor.pendingInputs().count == 1 }
@@ -56,6 +63,9 @@ final class RunSupervisorTests: XCTestCase {
         XCTAssertTrue(tkLog.contains("anvil-worktree=\(dir.path)"), tkLog)
         XCTAssertTrue(tkLog.contains("anvil-host=test-host"), tkLog)
         XCTAssertTrue(tkLog.contains("anvil-question=Which database engine"), tkLog)
+        // Mirroring is scoped to the ticket's own project via TICKETS_DIR (keys sorted).
+        XCTAssertTrue(tkLog.contains("add-note sample-block-1234 anvil: needs input — Which database engine | " + ticketDirArg(dir, "demo")), tkLog)
+        XCTAssertTrue(tkLog.contains("--set anvil-worktree=\(dir.path) | " + ticketDirArg(dir, "demo")), tkLog)
         // tk addresses the bare slug, never the namespaced id.
         XCTAssertFalse(tkLog.contains("demo/sample-block-1234"), tkLog)
 
@@ -82,7 +92,7 @@ final class RunSupervisorTests: XCTestCase {
             ].joined(separator: "\n")
         )
         let tk = try makeStubTk(in: dir, showStatus: "done")
-        let supervisor = makeSupervisor(claude: claude, tk: tk)
+        let supervisor = try makeSupervisor(claude: claude, tk: tk, dir: dir)
 
         let runID = try await supervisor.launch(ticketID: "demo/sample-ad-5678", workdir: dir)
         try await waitUntil { await supervisor.pendingInputs().count == 1 }
@@ -104,8 +114,9 @@ final class RunSupervisorTests: XCTestCase {
         XCTAssertTrue(claudeLog.contains("--resume \(sid)"), claudeLog)
 
         let tkLog = readLog(tk.argsLog)
-        XCTAssertTrue(tkLog.contains("show sample-ad-5678"), tkLog)
-        XCTAssertTrue(tkLog.contains(clearedExtras), tkLog)
+        // The done cross-check show is scoped to the ticket's project.
+        XCTAssertTrue(tkLog.contains("show sample-ad-5678 | " + ticketDirArg(dir, "demo")), tkLog)
+        XCTAssertTrue(tkLog.contains(clearedExtras + " | " + ticketDirArg(dir, "demo")), tkLog)
     }
 
     // MARK: done cross-check discrepancy
@@ -120,7 +131,7 @@ final class RunSupervisorTests: XCTestCase {
         ].joined(separator: "\n"))
         // Run reports DONE but tk says the ticket is still open.
         let tk = try makeStubTk(in: dir, showStatus: "open")
-        let supervisor = makeSupervisor(claude: claude, tk: tk)
+        let supervisor = try makeSupervisor(claude: claude, tk: tk, dir: dir)
 
         let runID = try await supervisor.launch(ticketID: "demo/sample-disc-9012", workdir: dir)
         try await waitUntil {
@@ -133,7 +144,7 @@ final class RunSupervisorTests: XCTestCase {
         XCTAssertTrue(model?.discrepancy?.contains("open") ?? false)
 
         let tkLog = readLog(tk.argsLog)
-        XCTAssertTrue(tkLog.contains("show sample-disc-9012"), tkLog)
+        XCTAssertTrue(tkLog.contains("show sample-disc-9012 | " + ticketDirArg(dir, "demo")), tkLog)
         XCTAssertTrue(tkLog.contains("WARNING"), tkLog)
     }
 
@@ -153,7 +164,7 @@ final class RunSupervisorTests: XCTestCase {
         )
         // tk status agrees the ticket is not done → no discrepancy.
         let tk = try makeStubTk(in: dir, showStatus: "open")
-        let supervisor = makeSupervisor(claude: claude, tk: tk)
+        let supervisor = try makeSupervisor(claude: claude, tk: tk, dir: dir)
 
         let runID = try await supervisor.launch(ticketID: "demo/sample-failed-3456", workdir: dir)
         try await waitUntil {
@@ -166,9 +177,9 @@ final class RunSupervisorTests: XCTestCase {
         let remaining = await supervisor.pendingInputs().count
         XCTAssertEqual(remaining, 0)
         let tkLog = readLog(tk.argsLog)
-        XCTAssertTrue(tkLog.contains(failedExtras), tkLog)
+        XCTAssertTrue(tkLog.contains(failedExtras + " | " + ticketDirArg(dir, "demo")), tkLog)
         XCTAssertTrue(tkLog.contains("add-note sample-failed-3456"), tkLog)
-        XCTAssertTrue(tkLog.contains("show sample-failed-3456"), tkLog)
+        XCTAssertTrue(tkLog.contains("show sample-failed-3456 | " + ticketDirArg(dir, "demo")), tkLog)
     }
 
     func testFailedStatusDiscrepancyFlagged() async throws {
@@ -185,7 +196,7 @@ final class RunSupervisorTests: XCTestCase {
         )
         // /work had set the ticket done, then the process exited nonzero — a discrepancy.
         let tk = try makeStubTk(in: dir, showStatus: "done")
-        let supervisor = makeSupervisor(claude: claude, tk: tk)
+        let supervisor = try makeSupervisor(claude: claude, tk: tk, dir: dir)
 
         let runID = try await supervisor.launch(ticketID: "demo/sample-faildisc-1212", workdir: dir)
         try await waitUntil {
@@ -212,8 +223,9 @@ final class RunSupervisorTests: XCTestCase {
             resultLine(needsInputBlock(question: "Which database", options: ["postgres"]), sessionID: sid),
         ].joined(separator: "\n"))
         let tk = try makeStubTk(in: dir)
+        let configURL = try writeTicketConfig([:], centralRoot: dir.appendingPathComponent("store"), in: dir)
         let engine = AnvilEngine(config: EngineConfig(claudeExecutableURL: claude.url))
-        let supervisor = RunSupervisor(engine: engine, tk: TkClient(executableURL: tk.url), hostName: "test-host")
+        let supervisor = RunSupervisor(engine: engine, tk: TkClient(executableURL: tk.url), configURL: configURL, hostName: "test-host")
 
         let runID = try await supervisor.launch(ticketID: "demo/sample-cancel-2468", workdir: dir)
         try await waitUntil { await supervisor.pendingInputs().count == 1 }
@@ -229,6 +241,8 @@ final class RunSupervisorTests: XCTestCase {
         XCTAssertEqual(remaining, 0)
         let tkLog = readLog(tk.argsLog)
         XCTAssertTrue(tkLog.contains(clearedExtras), tkLog)
+        // Settle/clear is scoped to the ticket's project.
+        XCTAssertTrue(tkLog.contains(ticketDirArg(dir, "demo")), tkLog)
     }
 
     // MARK: re-block re-marks; tk write failure is non-fatal
@@ -249,7 +263,7 @@ final class RunSupervisorTests: XCTestCase {
             ].joined(separator: "\n")
         )
         let tk = try makeStubTk(in: dir)
-        let supervisor = makeSupervisor(claude: claude, tk: tk)
+        let supervisor = try makeSupervisor(claude: claude, tk: tk, dir: dir)
 
         let runID = try await supervisor.launch(ticketID: "demo/sample-reblock-1313", workdir: dir)
         try await waitUntil { await supervisor.pendingInputs().first?.question == "Which database" }
@@ -276,7 +290,7 @@ final class RunSupervisorTests: XCTestCase {
         ].joined(separator: "\n"))
         // The first tk write (add-note) fails; the run must not be lost.
         let tk = try makeStubTk(in: dir, failVerb: "add-note")
-        let supervisor = makeSupervisor(claude: claude, tk: tk)
+        let supervisor = try makeSupervisor(claude: claude, tk: tk, dir: dir)
 
         let runID = try await supervisor.launch(ticketID: "demo/sample-tkfail-1414", workdir: dir)
         try await waitUntil {
@@ -301,7 +315,7 @@ final class RunSupervisorTests: XCTestCase {
             resultLine(doneBlock(summary: "ok"), sessionID: sid),
         ].joined(separator: "\n"))
         let tk = try makeStubTk(in: dir, showStatus: "done")
-        let supervisor = makeSupervisor(claude: claude, tk: tk)
+        let supervisor = try makeSupervisor(claude: claude, tk: tk, dir: dir)
 
         try await withTimeout {
             // Subscribe before launching so no events are missed.
@@ -328,7 +342,7 @@ final class RunSupervisorTests: XCTestCase {
             resultLine(doneBlock(summary: "ok"), sessionID: sid),
         ].joined(separator: "\n"))
         let tk = try makeStubTk(in: dir, showStatus: "done")
-        let supervisor = makeSupervisor(claude: claude, tk: tk)
+        let supervisor = try makeSupervisor(claude: claude, tk: tk, dir: dir)
 
         try await withTimeout {
             // Two independent observers must each receive the terminal event.

@@ -50,10 +50,10 @@ public struct TkClient: Sendable {
         ProcessSupport.resolveExecutable(named: "tk")
     }
 
-    /// `--repo` scopes a command to a project; required when the process cwd isn't that
-    /// project's repo (the bare slug alone won't resolve from a neutral cwd).
-    public func show(_ ticketID: String, repoURL: URL? = nil) async throws -> TicketInfo {
-        let output = try await run(["show", ticketID] + Self.repoArgs(repoURL))
+    /// `--repo` or `ticketDir` (`TICKETS_DIR`) scopes the command to a project; required when
+    /// the process cwd isn't that project's repo (a bare slug won't resolve from a neutral cwd).
+    public func show(_ ticketID: String, repoURL: URL? = nil, ticketDir: URL? = nil) async throws -> TicketInfo {
+        let output = try await run(["show", ticketID] + Self.repoArgs(repoURL), environment: Self.dirEnv(ticketDir))
         guard let status = Self.frontmatterValue("status", in: output.stdout) else {
             throw TkError.unexpectedOutput(command: "show", detail: "no status in frontmatter")
         }
