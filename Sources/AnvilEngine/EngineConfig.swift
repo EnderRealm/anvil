@@ -8,6 +8,12 @@ public struct EngineConfig: Sendable {
     /// always execs the resolved binary directly (never via a shell).
     public var claudeExecutableURL: URL
     public var model: String
+    /// `claude --permission-mode`. Default `bypassPermissions`: `/work` needs Bash tools
+    /// (swift build/test, installs) that `acceptEdits` does NOT auto-approve, so a run would
+    /// otherwise block at the build/test step and never complete unattended. bypassPermissions
+    /// approves all tools except explicit deny/ask rules. Runs are workspace-isolated by the
+    /// per-run worktree (F2) but NOT sandboxed — true blast-radius isolation is deferred to v2
+    /// (DESIGN §8). Dial back (acceptEdits / an allowlist) per risk tolerance.
     public var permissionMode: String
     public var headlessContract: String
     /// When set, every raw stdout line plus the spawned argv/cwd are appended here for replay.
@@ -18,7 +24,7 @@ public struct EngineConfig: Sendable {
     public init(
         claudeExecutableURL: URL = EngineConfig.resolveClaudeOnPath(),
         model: String = "opus",
-        permissionMode: String = "acceptEdits",
+        permissionMode: String = "bypassPermissions",
         headlessContract: String = EngineConfig.defaultHeadlessContract,
         debugLogURL: URL? = nil,
         ticketConfigURL: URL = EngineConfig.defaultTicketConfigURL()

@@ -68,9 +68,15 @@ is the path for *interactive* mode later; the event-parsing and session model ca
 
 **Spike-confirmed launch (see `docs/spike-findings.md`):** exec the real `claude` binary, not
 the shell alias; `claude -p "/work <id>" --append-system-prompt "<contract>" --output-format
-stream-json --verbose --model opus --permission-mode acceptEdits` (or `bypassPermissions`
-inside the worktree). **Not `--bare`** — it forces API-key auth. Capture `session_id` from
-`system/init`; resume from the **same cwd** (the worktree).
+stream-json --verbose --model opus --permission-mode bypassPermissions`. **Default is
+`bypassPermissions` in the worktree** (not `acceptEdits`): `/work` needs Bash tools
+(swift build/test, installs) that `acceptEdits` does not auto-approve, so a real run blocks at
+the build/test step and never completes unattended. The per-run worktree gives workspace
+isolation but **not** a sandbox — true blast-radius isolation is deferred to v2 (§8); the mode
+stays injectable to dial back (acceptEdits / allowlist) per risk tolerance. Both **launch and
+resume** pass `--permission-mode` (a resumed run still needs to build/test). **Not `--bare`** —
+it forces API-key auth. Capture `session_id` from `system/init`; resume from the **same cwd**
+(the worktree).
 
 ### 3.3 needs-input contract + queue + resume pointer
 

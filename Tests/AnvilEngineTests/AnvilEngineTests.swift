@@ -56,6 +56,8 @@ final class AnvilEngineTests: XCTestCase {
         XCTAssertTrue(loggedArgs.contains("/work demo/x"), "launched with the work prompt")
         XCTAssertTrue(loggedArgs.contains("--append-system-prompt"))
         XCTAssertTrue(loggedArgs.contains("stream-json"))
+        // Autonomous runs need Bash tool permissions (build/test) — bypassPermissions by default.
+        XCTAssertTrue(loggedArgs.contains("--permission-mode bypassPermissions"), loggedArgs)
     }
 
     // MARK: 2. done
@@ -324,6 +326,10 @@ final class AnvilEngineTests: XCTestCase {
 
         let loggedArgs = try String(contentsOf: stub.argsLog, encoding: .utf8)
         XCTAssertTrue(loggedArgs.contains("--resume \(sid)"), "resume passed the session id")
+        // Resume must also carry tool permissions so a re-run can build/test. Both the launch
+        // and resume invocations are logged, so assert it appears at least twice.
+        let permissionOccurrences = loggedArgs.components(separatedBy: "--permission-mode bypassPermissions").count - 1
+        XCTAssertGreaterThanOrEqual(permissionOccurrences, 2, "launch AND resume must carry --permission-mode bypassPermissions; log:\n\(loggedArgs)")
     }
 
     // MARK: 5. repo resolution
